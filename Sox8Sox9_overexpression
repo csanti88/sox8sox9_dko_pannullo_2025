@@ -1,0 +1,248 @@
+library(Seurat)
+library(tidyverse)
+library(scDblFinder)
+library(BiocParallel)
+library(harmony)
+library(UpSetR)
+library(ComplexHeatmap)
+library(viridis)
+set.seed(1234)
+
+#Load and merge data
+base_dir <- "E:/Sox KO/Raw/OverExpression"
+samples <- list.files(base_dir, full.names = F)
+
+seurat_list <- lapply(samples, function(s) {
+  mat <- ReadParseBio(data.dir = file.path(base_dir, s))
+  so <- CreateSeuratObject(counts = mat, min.cells = 3, min.features = 200)
+  so$orig.ident  <- s
+  Idents(so)     <- "orig.ident"
+  so$overexpress <- ifelse(grepl("Sox8Sox9", s), "Sox8Sox9", "GFP")
+  so$age <- "e14p0"
+  so})
+names(seurat_list) <- samples
+
+soxOE <- merge(x = seurat_list[[1]], y = seurat_list[-1],
+  add.cell.ids = samples, project = "Sox8Sox9_OE")
+
+#Set meta data
+soxOE$orig.ident <- factor(soxOE$orig.ident, levels = samples)
+soxOE$overexpress <- factor(soxOE$overexpress, levels = c("GFP","Sox8Sox9"))
+
+#Add % reads mapping to mitochondrial genes 
+soxOE$percent.mt <- PercentageFeatureSet(soxOE, pattern = "^mt")
+
+#Add cell cycle score. Change gene names to map to mouse genes
+capitalize_first <- function(text) {
+  text <- tolower(text)  
+  text <- paste(toupper(substr(text, 1, 1)), substr(text, 2, nchar(text)), sep = "")
+  return(text)
+}
+s.genes <- cc.genes.updated.2019$s.genes
+s.genes <- sapply(s.genes, capitalize_first)
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+g2m.genes <- sapply(g2m.genes, capitalize_first)
+soxOE[["RNA"]] <- JoinLayers(soxOE[["RNA"]])
+DefaultAssay(soxOE) <- "RNA"
+soxOE <- NormalizeData(soxOE)
+soxOE <- CellCycleScoring(soxOE, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+#Identify doublets
+sce <- as.SingleCellExperiment(soxOE , assay = "RNA") #remove assay if using Seurat v4
+sce <- scDblFinder(sce, samples="orig.ident",BPPARAM=SerialParam(RNGseed = 1234)) #compatible with windows machines
+soxOE@meta.data$doublet <- plyr::mapvalues(x = rownames(soxOE@meta.data), 
+                                               from = rownames(colData(sce)), to = as.character(sce$scDblFinder.class))
+soxOE@meta.data$doublet <- factor(soxOE@meta.data$doublet, levels = c("singlet","doublet"))
+soxOE@meta.data$doublet_score <- plyr::mapvalues(x = rownames(soxOE@meta.data), 
+                                                     from = rownames(colData(sce)), to = sce$scDblFinder.score)
+soxOE@meta.data$doublet_score<-as.numeric(soxOE@meta.data$doublet_score)
+
+soxOE@meta.data <- soxOE@meta.data %>%
+      mutate(pass_qc = ifelse(
+             nCount_RNA > 1000 &
+             nCount_RNA < 30000 &
+             percent.mt < 3 &  
+             doublet == "singlet",
+             "pass","fail"))
+soxOE <- subset(soxOE, subset = pass_qc == "pass")
+
+soxOE <- NormalizeData(soxOE) %>% FindVariableFeatures(nfeatures = 3000) %>% #use Variablefeatures from GFP
+          ScaleData(vars.to.regress = c("nCount_RNA","G2M.Score")) %>% 
+          RunPCA(verbose = FALSE) %>% RunHarmony(group.by.vars = c("orig.ident")) %>%
+          RunUMAP(reduction = "harmony", dims = 1:20) %>% FindNeighbors(reduction = "harmony", dims = 1:30) %>%
+          FindClusters(resolution = 0.8)
+
+clus<-c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15",
+        "16","17","18")
+cell<-c("RPC","RGC","AC","RPC","OPC/Schwann","AC","Doublet","AC","RGC",
+        "AC","AC","PR Precursor","Rod","Cone","nRPC","nRPC","RGC","OPC/Schwann","HC")
+soxOE@meta.data$Celltype <- plyr::mapvalues(x = soxOE@meta.data$seurat_clusters, 
+                                               from = clus, to = cell)
+Idents (soxOE) <- "Celltype"
+soxOE <- subset(soxOE, idents = "Doublet", invert = T)
+order<-c("RPC","nRPC","PR Precursor","Rod","Cone","AC","HC","RGC","OPC/Schwann")
+soxOE@meta.data$Celltype <- factor(soxOE@meta.data$Celltype, levels = order)
+Idents(soxOE) <- "Celltype"
+
+#####PLOTS#####
+#Plot split UMAP
+DimPlot(soxOE, split.by = "overexpress") & NoAxes()
+
+#Plot number OR percent of cells per cluster for each sample
+colors2 <- c("#4484DF", "#DF9144")
+meta.data <- soxOE@meta.data
+counts <- group_by(meta.data, overexpress, Celltype)	%>% dplyr::summarise(count = n()) %>%
+  group_by(overexpress) %>% dplyr::mutate(clust_total = sum(count)) %>% dplyr::mutate(clust_prop = count / clust_total * 100)
+ggplot(counts, aes(Celltype, clust_prop, fill = overexpress)) + 
+  geom_col(position = position_dodge2(preserve = "single")) + 
+  scale_fill_manual(values = colors2) +
+  labs(y = "Cell Percentage") + theme_classic() + RotatedAxis()
+ggplot(counts, aes(Celltype, count, fill = overexpress)) + 
+  geom_col(position = position_dodge2(preserve = "single")) + 
+  scale_fill_manual(values = colors2) +
+  labs(y = "Cell Percentage") + theme_classic() + RotatedAxis()
+
+# Violin plot of S.Score and G2M.Score
+colors2 <- c("#4484DF", "#DF9144")
+VlnPlot(soxOE, 
+        features = c("S.Score", "G2M.Score"), 
+        group.by = "overexpress",
+        pt.size = 0.1,
+        ncol = 2, cols = colors2)
+
+# Bar chart of cell cycle phase proportions
+phase_props <- soxOE@meta.data %>%
+  group_by(overexpress, Phase) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(overexpress) %>%
+  mutate(proportion = n / sum(n))
+
+ggplot(phase_props, aes(x = overexpress, y = proportion, fill = Phase)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("G1" = "#4DAF4A", "S" = "#377EB8", "G2M" = "#E41A1C")) +
+  labs(x = "Condition", y = "Proportion", fill = "Cell Cycle Phase") +
+  theme_classic()
+
+# DE Genes
+common_celltypes <- intersect(
+  unique(soxOE$Celltype[soxOE$overexpress == "GFP"]),
+  unique(soxOE$Celltype[soxOE$overexpress == "Sox8Sox9"])
+)
+
+# Run FindMarkers for each common cell type
+Idents(soxOE) <- "overexpress"
+
+markers_by_celltype <- list()
+
+for(ct in common_celltypes) {
+  soxOE_sub <- subset(soxOE, Celltype == ct)
+  Idents(soxOE_sub) <- "overexpress"
+  
+  markers_by_celltype[[ct]] <- FindMarkers(soxOE_sub,
+                                           ident.1 = "Sox8Sox9",
+                                           ident.2 = "GFP") %>%
+    filter(p_val_adj < 0.05) %>%
+    mutate(celltype = ct)
+}
+
+output_dir <- "E:/Sox KO"
+
+for(ct in names(markers_by_celltype)) {
+  filename <- paste0("e14p0_sox89OE_", ct, "_DEG_padj005.csv")
+  write.csv(markers_by_celltype[[ct]], 
+            file = file.path(output_dir, filename),
+            row.names = TRUE)
+}
+
+#Overlap of DE genes with early and late RPCs
+rpcDE <- read.csv(file = "E:/Sox KO/e14p0_sox89OE_RPC_DEG_padj005.csv", row.names = 1)
+mouse_dev <- readRDS(file = "E:/Mouse development/R files/mmdev.rds")
+earlyrpc_de <- FindMarkers(mouse_dev, ident.1 = "Early RPCs", min.pct = 0.1, only.pos = T) %>%  filter(p_val_adj < 0.05)
+laterpc_de <- FindMarkers(mouse_dev, ident.1 = c("Late RPCs"), min.pct = 0.1, only.pos = T) %>%  filter(p_val_adj < 0.05)
+
+rpcDE$early_RPC_gene <- ifelse(rownames(rpcDE) %in% rownames(earlyrpc_de), "yes", "no")
+rpcDE$late_RPC_gene <- ifelse(rownames(rpcDE) %in% rownames(laterpc_de), "yes", "no")
+
+up_genes <- rownames(rpcDE[rpcDE$avg_log2FC > 0, ])
+down_genes <- rownames(rpcDE[rpcDE$avg_log2FC < 0, ])
+
+# Create list of sets
+upset_list <- list(
+  Upregulated = up_genes,
+  Downregulated = down_genes,
+  Early_RPC = rownames(earlyrpc_de),
+  Late_RPC = rownames(laterpc_de))
+
+UpSetR::upset(fromList(upset_list),
+              order.by = "freq",
+              sets.bar.color = "#4484DF",
+              main.bar.color = "#4484DF",
+              intersections = list(
+                list("Upregulated"),
+                list("Downregulated"),
+                list("Upregulated", "Early_RPC"),
+                list("Upregulated", "Late_RPC"),
+                list("Downregulated", "Early_RPC"),
+                list("Downregulated", "Late_RPC"),
+                list("Upregulated", "Early_RPC", "Late_RPC"),
+                list("Downregulated", "Early_RPC", "Late_RPC")
+              ))
+
+# FeaturePlots
+FeaturePlot(soxOE, features = "Sox10", order = T, split.by = "overexpress", min.cutoff = "q5", max.cutoff = "q90", cols = c("grey", "orange")) & NoAxes()
+FeaturePlot(soxOE, features = "Olig1", order = T, split.by = "overexpress", min.cutoff = "q5", max.cutoff = "q90", cols = c("grey", "orange")) & NoAxes()
+FeaturePlot(soxOE, features = "Nkx2-2", order = T, split.by = "overexpress", min.cutoff = "q5", max.cutoff = "q90", cols = c("grey", "orange")) & NoAxes()
+
+#Overenrichment analysis for DE genes in RPC
+#GSEA on GO terms
+rpcDE <- read.csv(file = "E:/Sox KO/e14p0_sox89OE_RPC_DEG_padj005.csv", row.names = 1)
+go <- enrichGO(rownames(rpcDE), 
+             ont ="BP", 
+             keyType = "SYMBOL", 
+             pvalueCutoff = 0.05, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+
+#Plot dotplot for GSEA 
+dotplot(go, showCategory=20)
+
+
+#Heatmap DE genes in RPC showing Sox8/9 direct binding
+rpc <- subset(soxOE, Celltype == "RPC")
+pseudo_bulk <- AggregateExpression(rpc, 
+                                   group.by = "orig.ident",
+                                   assay = "RNA",
+                                   slot = "counts",
+                                   return.seurat = FALSE)$RNA
+
+pseudo_bulk_de <- pseudo_bulk[rownames(rpcDE), ]
+pseudo_bulk_de <- log1p(t(t(pseudo_bulk_de) / colSums(pseudo_bulk_de) * 1e6))
+pseudo_bulk_scaled <- t(scale(t(pseudo_bulk_de)))
+sample_anno <- data.frame(
+  Condition = ifelse(grepl("GFP", colnames(pseudo_bulk_scaled)), "GFP", "Sox8Sox9"),
+  row.names = colnames(pseudo_bulk_scaled)
+)
+
+genes_to_label <- c("Sox6", "Nfia", "Nfib", "Igf2bp1", "Foxn4", "Fgf15", 
+                    "Fezf2", "Slc15a2", "Enpp2", "Cd44", "Fosb", "Clic1", 
+                    "Denr", "Imt2a", "Fbn2", "Plagl1")
+label_idx <- which(rownames(pseudo_bulk_scaled) %in% genes_to_label)
+
+Heatmap(pseudo_bulk_scaled,
+        name = "Expression",
+        col = viridis(100, option = "magma"),
+        top_annotation = HeatmapAnnotation(
+          Condition = sample_anno$Condition,
+          col = list(Condition = c("GFP" = "#4484DF", "Sox8Sox9" = "#DF9144"))
+        ),
+        right_annotation = rowAnnotation(
+          mark = anno_mark(at = label_idx,
+                           labels = rownames(pseudo_bulk_scaled)[label_idx],
+                           labels_gp = gpar(fontsize = 8))
+        ),
+        cluster_columns = FALSE,
+        cluster_rows = TRUE,
+        show_row_names = FALSE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 6),
+        border = FALSE)

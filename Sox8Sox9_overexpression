@@ -156,12 +156,12 @@ for(ct in names(markers_by_celltype)) {
 
 #Overlap of DE genes with early and late RPCs
 rpcDE <- read.csv(file = "E:/Sox KO/e14p0_sox89OE_RPC_DEG_padj005.csv", row.names = 1)
-mouse_dev <- readRDS(file = "E:/Mouse development/R files/mmdev.rds")
-earlyrpc_de <- FindMarkers(mouse_dev, ident.1 = "Early RPCs", min.pct = 0.1, only.pos = T) %>%  filter(p_val_adj < 0.05)
-laterpc_de <- FindMarkers(mouse_dev, ident.1 = c("Late RPCs"), min.pct = 0.1, only.pos = T) %>%  filter(p_val_adj < 0.05)
+mouse_dev <- readRDS(file = "E:/Sox KO/lyu_hoang_santiago_cellreports2022_dataset6.csv")
+early_genes <- genelist$gene[genelist$cluster %in% c("RPC S1", "RPC S2")]
+late_genes <- genelist$gene[genelist$cluster %in% c("RPC S3", "MG")]
 
-rpcDE$early_RPC_gene <- ifelse(rownames(rpcDE) %in% rownames(earlyrpc_de), "yes", "no")
-rpcDE$late_RPC_gene <- ifelse(rownames(rpcDE) %in% rownames(laterpc_de), "yes", "no")
+rpcDE$early_RPC_gene <- ifelse(rownames(rpcDE) %in% early_genes, "yes", "no")
+rpcDE$late_RPC_gene <- ifelse(rownames(rpcDE) %in% late_genes, "yes", "no")
 
 up_genes <- rownames(rpcDE[rpcDE$avg_log2FC > 0, ])
 down_genes <- rownames(rpcDE[rpcDE$avg_log2FC < 0, ])
@@ -170,8 +170,8 @@ down_genes <- rownames(rpcDE[rpcDE$avg_log2FC < 0, ])
 upset_list <- list(
   Upregulated = up_genes,
   Downregulated = down_genes,
-  Early_RPC = rownames(earlyrpc_de),
-  Late_RPC = rownames(laterpc_de))
+  Early_RPC = rownames(early_genes),
+  Late_RPC = rownames(late_genes))
 
 UpSetR::upset(fromList(upset_list),
               order.by = "freq",
@@ -194,7 +194,7 @@ FeaturePlot(soxOE, features = "Olig1", order = T, split.by = "overexpress", min.
 FeaturePlot(soxOE, features = "Nkx2-2", order = T, split.by = "overexpress", min.cutoff = "q5", max.cutoff = "q90", cols = c("grey", "orange")) & NoAxes()
 
 #Overenrichment analysis for DE genes in RPC
-#GSEA on GO terms
+#ORA on GO terms
 rpcDE <- read.csv(file = "E:/Sox KO/e14p0_sox89OE_RPC_DEG_padj005.csv", row.names = 1)
 go <- enrichGO(rownames(rpcDE), 
              ont ="BP", 

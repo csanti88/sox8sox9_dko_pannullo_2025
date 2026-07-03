@@ -156,7 +156,7 @@ for(ct in names(markers_by_celltype)) {
 
 #Overlap of DE genes with early and late RPCs
 rpcDE <- read.csv(file = "E:/Sox KO/e14p0_sox89OE_RPC_DEG_padj005.csv", row.names = 1)
-mouse_dev <- readRDS(file = "E:/Sox KO/lyu_hoang_santiago_cellreports2022_dataset6.csv")
+genelist <- read.csv(file = "E:/Sox KO/lyu_hoang_santiago_cellreports2022_dataset6.csv")
 early_genes <- genelist$gene[genelist$cluster %in% c("RPC S1", "RPC S2")]
 late_genes <- genelist$gene[genelist$cluster %in% c("RPC S3", "MG")]
 
@@ -170,8 +170,8 @@ down_genes <- rownames(rpcDE[rpcDE$avg_log2FC < 0, ])
 upset_list <- list(
   Upregulated = up_genes,
   Downregulated = down_genes,
-  Early_RPC = rownames(early_genes),
-  Late_RPC = rownames(late_genes))
+  Early_RPC = early_genes,
+  Late_RPC = late_genes)
 
 UpSetR::upset(fromList(upset_list),
               order.by = "freq",
